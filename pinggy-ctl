@@ -1,0 +1,182 @@
+#!/bin/bash
+#
+# pinggy-ctl - control script for the Pinggy tunnel plugin (Unraid)
+#
+# Manages a single, long-running SSH session to Pinggy using one Pro token.
+# Multiple local services can be exposed through that one session via
+# Pinggy's "multiple forwardings" feature (several -R rules in one command).
+#
+# Usage: pinggy-ctl {start|stop|restart|status|run|log}
+
+CFG_DIR="/boot/config/plugins/pinggy"
+CFG_FILE="$CFG_DIR/pinggy.cfg"
+FWD_FILE="$CFG_DIR/forwardings.cfg"
+PID_FILE="/var/run/pinggy.pid"
+LOG_FILE="/var/log/pinggy.log"
+MAX_LOG_LINES=2000
+
+load_cfg() {
+    TOKEN=""
+    PINGGY_HOST="pro.pinggy.io"
+    USE_FORCE="1"
+    AUTO_RECONNECT="1"
+    KEEPALIVE_ENABLED="1"
+    KEEPALIVE="60"
+    HTTPS_ONLY="0"
+    XFF="0"
+    FULLURL="0"
+    AUTOSTART="0"
+    [ -f "$CFG_FILE" ] && source "$CFG_FILE"
+}
+
+# Build the -R arguments from forwardings.cfg
+# Line format: enabled|type|hostname|local_host|local_port
+#   type: http | tcp | tls | tlstcp | udp | default
+#   hostname: required for named forwardings (needs a wildcard custom
+#             domain on your token); leave blank for a plain/default route
+#   udp rows are skipped - UDP tunnels require Pinggy's own CLI binary and
+#   cannot be created over a plain ssh session (not bundled with this plugin)
+build_args() {
+    local args=""
+    local any=0
+    if [ -f "$FWD_FILE" ]; then
+        while IFS='|' read -r enabled type hostname lhost lport; do
+            [ -z "$enabled" ] && continue
+            [ "$enabled" != "1" ] && continue
+            [ -z "$lport" ] && continue
+            lhost="${lhost:-localhost}"
+            type="${type:-http}"
+            if [ "$type" = "udp" ]; then
+                echo "$(date '+%F %T') Skipping forwarding to ${lhost}:${lport} - type=udp requires the Pinggy CLI binary, not supported over plain ssh." >> "$LOG_FILE"
+                continue
+            fi
+            if [ "$type" = "default" ] || [ -z "$hostname" ]; then
+                args="$args -R1:${lhost}:${lport}"
+            else
+                args="$args -R${type}//${hostname}:1:${lhost}:${lport}"
+            fi
+            any=1
+        done < "$FWD_FILE"
+    fi
+    [ "$any" = "0" ] && return 1
+    echo "$args"
+    return 0
+}
+
+# Build the trailing x:/etc "remote options" that get appended after the
+# target host on the ssh command line (session-wide, not per-forwarding)
+build_remote_opts() {
+    local opts=""
+    [ "$HTTPS_ONLY" = "1" ] && opts="$opts x:https"
+    [ "$XFF" = "1" ] && opts="$opts x:xff"
+    [ "$FULLURL" = "1" ] && opts="$opts x:fullurl"
+    echo "$opts"
+}
+
+trim_log() {
+    [ -f "$LOG_FILE" ] || return
+    tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "${LOG_FILE}.tmp" 2>/dev/null && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+}
+
+run_tunnel_once() {
+    local fwd_args="$1"
+    local remote_opts="$2"
+    local user="$TOKEN"
+    [ "$USE_FORCE" = "1" ] && user="${TOKEN}+force"
+
+    local keepalive_opts=""
+    if [ "$KEEPALIVE_ENABLED" = "1" ]; then
+        keepalive_opts="-o ServerAliveInterval=${KEEPALIVE} -o ServerAliveCountMax=3"
+    fi
+
+    trim_log
+    echo "$(date '+%F %T') Starting Pinggy tunnel: ssh -p443 $fwd_args ${TOKEN:0:4}...@${PINGGY_HOST} ${remote_opts}" >> "$LOG_FILE"
+    # shellcheck disable=SC2086
+    ssh -p 443 \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ExitOnForwardFailure=yes \
+        $keepalive_opts \
+        $fwd_args \
+        "${user}@${PINGGY_HOST}" \
+        $remote_opts >> "$LOG_FILE" 2>&1
+    return $?
+}
+
+# Internal supervisor loop - do not call directly, use `start`
+run_loop() {
+    load_cfg
+    local fwd_args remote_opts
+    fwd_args=$(build_args)
+    if [ $? -ne 0 ]; then
+        echo "$(date '+%F %T') No enabled forwardings configured - not starting." >> "$LOG_FILE"
+        exit 1
+    fi
+    if [ -z "$TOKEN" ]; then
+        echo "$(date '+%F %T') No Pinggy token configured - not starting." >> "$LOG_FILE"
+        exit 1
+    fi
+    remote_opts=$(build_remote_opts)
+
+    if [ "$AUTO_RECONNECT" = "1" ]; then
+        while true; do
+            run_tunnel_once "$fwd_args" "$remote_opts"
+            echo "$(date '+%F %T') Tunnel exited (code $?), reconnecting in 3s..." >> "$LOG_FILE"
+            sleep 3
+        done
+    else
+        run_tunnel_once "$fwd_args" "$remote_opts"
+        echo "$(date '+%F %T') Tunnel exited (code $?). Auto Reconnect is off, not restarting." >> "$LOG_FILE"
+    fi
+}
+
+is_running() {
+    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
+}
+
+start() {
+    load_cfg
+    if is_running; then
+        echo "Pinggy tunnel already running (PID $(cat "$PID_FILE"))"
+        return 0
+    fi
+    rm -f "$PID_FILE"
+    nohup "$0" run >/dev/null 2>&1 &
+    echo $! > "$PID_FILE"
+    sleep 1
+    echo "Pinggy tunnel started (PID $(cat "$PID_FILE"))"
+}
+
+stop() {
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(cat "$PID_FILE")
+        pkill -P "$pid" 2>/dev/null
+        kill "$pid" 2>/dev/null
+        rm -f "$PID_FILE"
+    fi
+    # clean up any lingering ssh session to pinggy hosts started by this plugin
+    pkill -f "ssh -p 443 .*pinggy.io" 2>/dev/null
+    echo "Pinggy tunnel stopped"
+}
+
+status() {
+    if is_running; then
+        echo "running"
+    else
+        echo "stopped"
+    fi
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; sleep 1; start ;;
+    status)  status ;;
+    run)     run_loop ;;
+    log)     tail -n "${2:-50}" "$LOG_FILE" 2>/dev/null ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status|run|log [n]}"
+        exit 1
+        ;;
+esac

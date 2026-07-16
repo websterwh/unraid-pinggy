@@ -1,0 +1,164 @@
+Menu="Utilities"
+Title="Pinggy Tunnel"
+Icon="globe"
+---
+<?php
+global $var;
+require_once("/usr/local/emhttp/plugins/pinggy/php/helpers.php");
+
+$cfg    = pinggy_load_cfg($cfgFile);
+$fwds   = pinggy_load_fwds($fwdFile);
+if (empty($fwds)) {
+    $fwds[] = ["enabled"=>"1","type"=>"http","hostname"=>"","local_host"=>"localhost","local_port"=>""];
+}
+$status = trim(shell_exec("$ctl status 2>&1"));
+$log    = shell_exec("$ctl log 60 2>&1");
+$csrf   = htmlspecialchars($var['csrf_token'] ?? '');
+?>
+
+<style>
+.pinggy-wrap { max-width: 980px; }
+.pinggy-status { font-weight: bold; padding: 2px 10px; border-radius: 4px; display: inline-block; }
+.pinggy-status.running { background:#2e7d32; color:#fff; }
+.pinggy-status.stopped { background:#b71c1c; color:#fff; }
+.pinggy-table { width:100%; border-collapse: collapse; margin: 10px 0; }
+.pinggy-table th, .pinggy-table td { padding: 4px 6px; text-align:left; vertical-align: middle; }
+.pinggy-table input[type=text] { width: 100%; box-sizing: border-box; }
+.pinggy-log { background:#111; color:#0f0; font-family: monospace; font-size: 12px;
+              padding: 10px; height: 240px; overflow-y: auto; white-space: pre-wrap; }
+.pinggy-note { opacity:.7; font-size: 12px; }
+.pinggy-toggle-row td:first-child { width: 280px; }
+</style>
+
+<iframe name="progressFrame" style="display:none;"></iframe>
+
+<div class="pinggy-wrap">
+
+<h3>Status: <span class="pinggy-status <?= $status === 'running' ? 'running' : 'stopped' ?>"><?= strtoupper($status) ?></span></h3>
+
+<form method="post" action="/plugins/pinggy/action.php?do=start" target="progressFrame" style="display:inline;">
+  <input type="hidden" name="csrf_token" value="<?= $csrf ?>">
+  <input type="submit" class="btn" value="Start Tunnel">
+</form>
+<form method="post" action="/plugins/pinggy/action.php?do=stop" target="progressFrame" style="display:inline;">
+  <input type="hidden" name="csrf_token" value="<?= $csrf ?>">
+  <input type="submit" class="btn" value="Stop Tunnel">
+</form>
+<form method="post" action="/plugins/pinggy/action.php?do=restart" target="progressFrame" style="display:inline;">
+  <input type="hidden" name="csrf_token" value="<?= $csrf ?>">
+  <input type="submit" class="btn" value="Restart Tunnel">
+</form>
+
+<h3>Connection</h3>
+<form method="post" action="/plugins/pinggy/action.php?do=save_settings" target="progressFrame">
+  <input type="hidden" name="csrf_token" value="<?= $csrf ?>">
+  <table class="pinggy-table pinggy-toggle-row">
+    <tr>
+      <td>Pinggy Pro token</td>
+      <td><input type="text" name="token" value="<?= htmlspecialchars($cfg['TOKEN']) ?>" placeholder="e.g. xGBTh6cy58q"></td>
+    </tr>
+    <tr>
+      <td>Region</td>
+      <td>
+        <select name="region">
+          <?php foreach ($regionLabels as $key => $label): ?>
+            <option value="<?= $key ?>" <?= $cfg['REGION']===$key ? 'selected' : '' ?>><?= $label ?></option>
+          <?php endforeach; ?>
+        </select>
+        <div class="pinggy-note">Picks the Pinggy edge server. South America / Australia have no published dedicated hostname yet, so they fall back to Auto.</div>
+      </td>
+    </tr>
+    <tr>
+      <td>Server override (optional)</td>
+      <td>
+        <input type="text" name="pinggy_host" value="" placeholder="leave blank to use Region above">
+        <div class="pinggy-note">Currently resolved to: <b><?= htmlspecialchars($cfg['PINGGY_HOST']) ?></b>. Fill this in to bypass the Region setting entirely.</div>
+      </td>
+    </tr>
+    <tr>
+      <td>Auto Reconnect</td>
+      <td><input type="checkbox" name="auto_reconnect" <?= $cfg['AUTO_RECONNECT']==='1' ? 'checked' : '' ?>>
+        <span class="pinggy-note">Reconnect automatically if the tunnel drops</span></td>
+    </tr>
+    <tr>
+      <td>Keep Alive</td>
+      <td>
+        <input type="checkbox" name="keepalive_enabled" <?= $cfg['KEEPALIVE_ENABLED']==='1' ? 'checked' : '' ?>>
+        <span class="pinggy-note">Send keep-alive packets for a stable connection, every</span>
+        <input type="text" name="keepalive" value="<?= htmlspecialchars($cfg['KEEPALIVE']) ?>" style="width:60px; display:inline-block;"> sec
+      </td>
+    </tr>
+    <tr>
+      <td>Force New Tunnel</td>
+      <td><input type="checkbox" name="use_force" <?= $cfg['USE_FORCE']==='1' ? 'checked' : '' ?>>
+        <span class="pinggy-note">Close any existing tunnel on this token and start fresh (recommended - a Pro token only allows one active session)</span></td>
+    </tr>
+    <tr>
+      <td>Start automatically on array start</td>
+      <td><input type="checkbox" name="autostart" <?= $cfg['AUTOSTART']==='1' ? 'checked' : '' ?>></td>
+    </tr>
+  </table>
+
+  <h4>Headers &amp; Security</h4>
+  <table class="pinggy-table pinggy-toggle-row">
+    <tr>
+      <td>X-Forwarded-For Header</td>
+      <td><input type="checkbox" name="xff" <?= $cfg['XFF']==='1' ? 'checked' : '' ?>>
+        <span class="pinggy-note">Add X-Forwarded-For header to every request (x:xff)</span></td>
+    </tr>
+    <tr>
+      <td>Original Request URL Header</td>
+      <td><input type="checkbox" name="fullurl" <?= $cfg['FULLURL']==='1' ? 'checked' : '' ?>>
+        <span class="pinggy-note">Forward the original request URI in the X-Pinggy-Url header (x:fullurl)</span></td>
+    </tr>
+    <tr>
+      <td>HTTPS Only</td>
+      <td><input type="checkbox" name="https_only" <?= $cfg['HTTPS_ONLY']==='1' ? 'checked' : '' ?>>
+        <span class="pinggy-note">Only allow HTTPS requests, HTTP is redirected (x:https)</span></td>
+    </tr>
+  </table>
+
+  <input type="submit" class="btn" value="Save Settings">
+</form>
+
+<h3>Forwardings</h3>
+<p class="pinggy-note">
+  All forwardings run through the single SSH session above (one token = one session).
+  Leave <b>Hostname</b> blank for a plain default route to Pinggy's assigned URL/port.
+  Set a hostname only if you've configured a wildcard custom domain for this token in the Pinggy dashboard.
+  <b>UDP</b> rows are accepted here but skipped at runtime - Pinggy only supports UDP tunnels through
+  their separate CLI binary, which this plugin does not bundle.
+</p>
+<form method="post" action="/plugins/pinggy/action.php?do=save_forwardings" target="progressFrame">
+  <input type="hidden" name="csrf_token" value="<?= $csrf ?>">
+  <table class="pinggy-table">
+    <tr>
+      <th>On</th><th>Type</th><th>Hostname (optional)</th><th>Local host</th><th>Local port</th><th>Del</th>
+    </tr>
+    <?php foreach ($fwds as $i => $r): ?>
+    <tr>
+      <td><input type="checkbox" name="fwd_enabled_<?= $i ?>" <?= $r['enabled']==='1'?'checked':'' ?>></td>
+      <td>
+        <select name="fwd_type_<?= $i ?>">
+          <?php foreach (["http","tcp","tls","tlstcp","udp","default"] as $t): ?>
+            <option value="<?= $t ?>" <?= $r['type']===$t?'selected':'' ?>><?= strtoupper($t) ?></option>
+          <?php endforeach; ?>
+        </select>
+      </td>
+      <td><input type="text" name="fwd_hostname_<?= $i ?>" value="<?= htmlspecialchars($r['hostname']) ?>" placeholder="app.example.com"></td>
+      <td><input type="text" name="fwd_localhost_<?= $i ?>" value="<?= htmlspecialchars($r['local_host']) ?>" placeholder="localhost"></td>
+      <td><input type="text" name="fwd_port_<?= $i ?>" value="<?= htmlspecialchars($r['local_port']) ?>" placeholder="8080"></td>
+      <td><input type="checkbox" name="fwd_delete_<?= $i ?>"></td>
+    </tr>
+    <?php endforeach; ?>
+  </table>
+  <input type="hidden" name="row_count" value="<?= count($fwds) ?>">
+  <input type="submit" name="add_row" value="Add Row" class="btn">
+  <input type="submit" value="Save Forwardings" class="btn">
+</form>
+
+<h3>Log</h3>
+<div class="pinggy-log"><?= htmlspecialchars($log) ?></div>
+<p class="pinggy-note">The public URL Pinggy assigns is printed in this log when the tunnel connects. This page reloads automatically a moment after any Save/Start/Stop/Restart.</p>
+
+</div>

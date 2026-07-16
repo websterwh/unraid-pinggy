@@ -1,0 +1,24 @@
+#!/bin/bash
+#
+# rc.pinggy - start/stop the Pinggy tunnel service
+#
+CTL="/usr/local/emhttp/plugins/pinggy/scripts/pinggy-ctl"
+
+case "$1" in
+    start)
+        "$CTL" start
+        ;;
+    stop)
+        "$CTL" stop
+        ;;
+    restart)
+        "$CTL" restart
+        ;;
+    status)
+        "$CTL" status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
